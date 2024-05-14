@@ -3,10 +3,14 @@ import requests
 import time
 import aiohttp
 import asyncio
-import pyttsx3
+import gi
+from gtts import gTTS
+import os
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst
 
-# Initialize TTS engine
-tts_engine = pyttsx3.init()
+# Initialize GStreamer
+Gst.init(None)
 
 # Function to perform OCR with caching
 async def ocr_space_file_with_cache(file_path, api_key):
@@ -60,27 +64,41 @@ async def ask_chatgpt_async(question, openai_api_key):
         async with session.post(url, json=payload, headers=headers) as response:
             return await response.json()
 
-# Function to convert text to speech
-def text_to_speech(text):
-    tts_engine.say(text)
-    tts_engine.runAndWait()
+# Function to convert text to speech using gTTS and GStreamer
+def play_text(text):
+    tts = gTTS(text=text, lang='en')
+    tts.save('response.mp3')
+    # Set up a simple GStreamer pipeline to play audio
+    player = Gst.ElementFactory.make("playbin", "player")
+    player.set_property('uri', 'file://' + os.path.abspath('response.mp3'))
+    player.set_state(Gst.State.PLAYING)
+    # Wait until error or EOS
+    bus = player.get_bus()
+    bus.timed_pop_filtered(Gst.CLOCK_TIME_NONE, Gst.MessageType.ERROR | Gst.MessageType.EOS)
+    # Free resources
+    player.set_state(Gst.State.NULL)
 
 # Main function to orchestrate the calls
 async def main(file_path, question, ocr_api_key, openai_api_key):
     ocr_result = await ocr_space_file_with_cache(file_path, ocr_api_key)
-    extracted_text = ocr_result['ParsedResults'][0]['ParsedText']
 
-    response = await ask_chatgpt_async(question, openai_api_key)
-    chatgpt_response = response['choices'][0]['message']['content']
+    # Check if 'ParsedResults' key exists in the OCR result
+    if 'ParsedResults' in ocr_result and ocr_result['ParsedResults']:
+        extracted_text = ocr_result['ParsedResults'][0]['ParsedText']
+        response = await ask_chatgpt_async(question, openai_api_key)
+        chatgpt_response = response['choices'][0]['message']['content']
 
-    # Call text_to_speech with the response text
-    text_to_speech(chatgpt_response)
+        # Call play_text with the response text
+        play_text(chatgpt_response)
+    else:
+        print("Error: 'ParsedResults' key not found in OCR response")
+        play_text("There was an error processing the OCR result.")
 
 if __name__ == '__main__':
     # Example usage
-    file_path = 'path_to_your_image_file'
-    question = 'Your question here'
-    ocr_api_key = 'your_ocr_api_key'
-    openai_api_key = 'your_openai_api_key'
+    file_path = '/home/jasalat/text.jpg'
+    question = 'Solve this question or at least explain it briefly'
+    ocr_api_key = ''
+    openai_api_key = ''
 
     asyncio.run(main(file_path, question, ocr_api_key, openai_api_key))
