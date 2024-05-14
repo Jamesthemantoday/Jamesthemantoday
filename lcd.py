@@ -1,48 +1,93 @@
-import digitalio
-import board
-import adafruit_st7789 as st7789
-from PIL import Image, ImageDraw, ImageFont
+import hashlib
+import requests
+import time
+import aiohttp
+import asyncio
 
-# Configuration for CS, DC, and Reset pins
-cs_pin = digitalio.DigitalInOut(board.CE0)  # Chip select
-dc_pin = digitalio.DigitalInOut(board.D25)  # Data/command
-rst_pin = digitalio.DigitalInOut(board.D27)  # Reset
+# Cache dictionary for storing OCR results
+cache = {}
 
-# SPI setup
-spi = board.SPI()
+# Function to compute file hash
+def compute_file_hash(filename):
+    with open(filename, 'rb') as f:
+        file_hash = hashlib.md5(f.read()).hexdigest()
+    return file_hash
 
-# ST7789 display initialization
-display = st7789.ST7789(
-    spi, rotation=0,  # Change rotation if needed
-    width=240, height=280,  # Adjust to your screen's dimensions
-    cs=cs_pin, dc=dc_pin, rst=rst_pin,
-    baudrate=24000000  # May need adjustment for your particular display
-)
+# Caching for OCR.space
+def ocr_space_file_with_cache(filename, api_key):
+    file_hash = compute_file_hash(filename)
+    if file_hash in cache:
+        print("Returning cached result")
+        return cache[file_hash]
 
-# Clear the display to black
-display.fill(0)
+    result = ocr_space_file(filename, api_key)
+    cache[file_hash] = result
+    return result
 
-# Create a blank image for drawing
-# Make sure to create an image with mode 'RGB' for full color
-if display.rotation % 180 == 90:
-    height = display.width  # we swap height/width to rotate it to landscape!
-    width = display.height
-else:
-    width = display.width  # we swap height/width to rotate it to landscape!
-    height = display.height
-image = Image.new("RGB", (width, height))
-draw = ImageDraw.Draw(image)
+# Basic OCR.space function without modifications
+def ocr_space_file(filename, api_key):
+    url = 'https://api.ocr.space/parse/image'
+    payload = {'isOverlayRequired': False, 'apikey': api_key, 'language': 'eng'}
+    with open(filename, 'rb') as f:
+        files = {'file': f}
+        response = requests.post(url, files=files, data=payload)
+    return response.json()
 
-# Load a TTF font
-font = ImageFont.load_default()
+# Exponential backoff for API calls
+def backoff_retry(func):
+    def wrapper(*args, **kwargs):
+        attempts = 3
+        delay = 1
+        for i in range(attempts):
+            try:
+                return func(*args, **kwargs)
+            except requests.exceptions.RequestException as e:
+                print(f"API call failed: {e}, retrying in {delay} seconds...")
+                time.sleep(delay)
+                delay *= 2
+        return None
+    return wrapper
 
-# Define the position of the text
-text = "Hello, World!"
-(font_width, font_height) = draw.textsize(text, font=font)
-draw.text(
-    (width // 2 - font_width // 2, height // 2 - font_height // 2),
-    text, font=font, fill=(255, 255, 255)
-)
+# Asynchronous call to OpenAI
+async def ask_chatgpt_async(question, openai_api_key):
+    url = 'https://api.openai.com/v1/chat/completions'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {openai_api_key}',
+        'messages': [{'role': 'user', 'content': question}]
+    }
+    payload = {
+        'model': 'gpt-3.5-turbo',
+        'prompt': question,
+        'max_tokens': 150
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as response:
+            return await response.json()
 
-# Display the image
-display.image(image)
+# Main function to orchestrate the calls
+def main(filename, question, ocr_api_key, openai_api_key):
+    # OCR with caching
+    ocr_result = ocr_space_file_with_cache(filename, ocr_api_key)
+    print("OCR Result:", ocr_result)
+
+    # Extract the necessary text
+    if 'ParsedResults' in ocr_result and len(ocr_result['ParsedResults']) > 0:
+        parsed_text = ocr_result['ParsedResults'][0].get('ParsedText', '')
+        print("Extracted Text:", parsed_text)
+    else:
+        print("No text found or error in OCR")
+        return
+
+    # Using asyncio to call ChatGPT asynchronously with the parsed text
+    loop = asyncio.get_event_loop()
+    chatgpt_response = loop.run_until_complete(ask_chatgpt_async(parsed_text, openai_api_key))
+    print("ChatGPT Response:", chatgpt_response)
+
+# Example usage
+if __name__ == "__main__":
+    filename = '/home/jasalat/text.jpg'
+    question = "Solve this question or atleast make sense of it"
+    ocr_api_key = ""
+    openai_api_key = ""
+    main(filename, question, ocr_api_key, openai_api_key)
