@@ -79,26 +79,43 @@ def play_text(text):
     player.set_state(Gst.State.NULL)
 
 # Main function to orchestrate the calls
-async def main(file_path, question, ocr_api_key, openai_api_key):
+async def main(file_path, ocr_api_key, openai_api_key):
     ocr_result = await ocr_space_file_with_cache(file_path, ocr_api_key)
+    print("OCR Result:", ocr_result)  # Debugging line
 
     # Check if 'ParsedResults' key exists in the OCR result
     if 'ParsedResults' in ocr_result and ocr_result['ParsedResults']:
-        extracted_text = ocr_result['ParsedResults'][0]['ParsedText']
-        response = await ask_chatgpt_async(question, openai_api_key)
-        chatgpt_response = response['choices'][0]['message']['content']
+        parsed_result = ocr_result['ParsedResults'][0]
+        
+        # Check if 'IsErroredOnProcessing' key exists
+        if 'IsErroredOnProcessing' in parsed_result and parsed_result['IsErroredOnProcessing']:
+            error_message = parsed_result.get('ErrorMessage', ['Unknown error'])[0]
+            print(f"Error in OCR processing: {error_message}")
+            play_text(f"Error in OCR processing: {error_message}")
+        else:
+            extracted_text = parsed_result.get('ParsedText', '')
+            if extracted_text:
+                print("Extracted Text:", extracted_text)  # Debugging line
+                
+                response = await ask_chatgpt_async(extracted_text, openai_api_key)
+                print("OpenAI API Response:", response)  # Debugging line
 
-        # Call play_text with the response text
-        play_text(chatgpt_response)
+                if 'choices' in response and response['choices']:
+                    chatgpt_response = response['choices'][0]['message']['content']
+                    play_text(chatgpt_response)
+                else:
+                    play_text("There was an error with the OpenAI response.")
+            else:
+                print("No text found in OCR result")
+                play_text("No text found in OCR result")
     else:
-        print("Error: 'ParsedResults' key not found in OCR response")
-        play_text("There was an error processing the OCR result.")
+        print("Error: No text found or error in OCR")
+        play_text("No text found or error in OCR.")
 
 if __name__ == '__main__':
     # Example usage
     file_path = '/home/jasalat/text.jpg'
-    question = 'Solve this question or at least explain it briefly'
     ocr_api_key = ''
     openai_api_key = ''
 
-    asyncio.run(main(file_path, question, ocr_api_key, openai_api_key))
+    asyncio.run(main(file_path, ocr_api_key, openai_api_key))
