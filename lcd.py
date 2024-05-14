@@ -3,91 +3,84 @@ import requests
 import time
 import aiohttp
 import asyncio
+import pyttsx3
 
-# Cache dictionary for storing OCR results
-cache = {}
+# Initialize TTS engine
+tts_engine = pyttsx3.init()
 
-# Function to compute file hash
-def compute_file_hash(filename):
-    with open(filename, 'rb') as f:
-        file_hash = hashlib.md5(f.read()).hexdigest()
-    return file_hash
+# Function to perform OCR with caching
+async def ocr_space_file_with_cache(file_path, api_key):
+    file_hash = hashlib.md5(open(file_path, 'rb').read()).hexdigest()
+    cache = {}
 
-# Caching for OCR.space
-def ocr_space_file_with_cache(filename, api_key):
-    file_hash = compute_file_hash(filename)
     if file_hash in cache:
-        print("Returning cached result")
         return cache[file_hash]
+    else:
+        result = await backoff_retry(ocr_space_file, file_path, api_key)
+        cache[file_hash] = result
+        return result
 
-    result = ocr_space_file(filename, api_key)
-    cache[file_hash] = result
-    return result
-
-# Basic OCR.space function without modifications
-def ocr_space_file(filename, api_key):
+# Function to call OCR.space API
+async def ocr_space_file(file_path, api_key):
     url = 'https://api.ocr.space/parse/image'
-    payload = {'isOverlayRequired': False, 'apikey': api_key, 'language': 'eng'}
-    with open(filename, 'rb') as f:
-        files = {'file': f}
-        response = requests.post(url, files=files, data=payload)
-    return response.json()
+    payload = {'isOverlayRequired': False, 'apikey': api_key}
+    with open(file_path, 'rb') as f:
+        r = requests.post(url, files={file_path: f}, data=payload)
+    return r.json()
 
-# Exponential backoff for API calls
-def backoff_retry(func):
-    def wrapper(*args, **kwargs):
-        attempts = 3
-        delay = 1
-        for i in range(attempts):
-            try:
-                return func(*args, **kwargs)
-            except requests.exceptions.RequestException as e:
-                print(f"API call failed: {e}, retrying in {delay} seconds...")
+# Exponential backoff mechanism for API calls
+async def backoff_retry(func, *args, **kwargs):
+    max_retries = 5
+    delay = 1
+
+    for i in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            if i < max_retries - 1:
                 time.sleep(delay)
                 delay *= 2
-        return None
-    return wrapper
+            else:
+                raise e
 
-# Asynchronous call to OpenAI
+# Asynchronous call to OpenAI API
 async def ask_chatgpt_async(question, openai_api_key):
     url = 'https://api.openai.com/v1/chat/completions'
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {openai_api_key}',
-        'messages': [{'role': 'user', 'content': question}]
+        'Authorization': f'Bearer {openai_api_key}'
     }
     payload = {
         'model': 'gpt-3.5-turbo',
-        'prompt': question,
+        'messages': [{'role': 'user', 'content': question}],
         'max_tokens': 150
     }
+
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers) as response:
             return await response.json()
 
+# Function to convert text to speech
+def text_to_speech(text):
+    tts_engine.say(text)
+    tts_engine.runAndWait()
+
 # Main function to orchestrate the calls
-def main(filename, question, ocr_api_key, openai_api_key):
-    # OCR with caching
-    ocr_result = ocr_space_file_with_cache(filename, ocr_api_key)
-    print("OCR Result:", ocr_result)
+async def main(file_path, question, ocr_api_key, openai_api_key):
+    ocr_result = await ocr_space_file_with_cache(file_path, ocr_api_key)
+    extracted_text = ocr_result['ParsedResults'][0]['ParsedText']
 
-    # Extract the necessary text
-    if 'ParsedResults' in ocr_result and len(ocr_result['ParsedResults']) > 0:
-        parsed_text = ocr_result['ParsedResults'][0].get('ParsedText', '')
-        print("Extracted Text:", parsed_text)
-    else:
-        print("No text found or error in OCR")
-        return
+    response = await ask_chatgpt_async(question, openai_api_key)
+    chatgpt_response = response['choices'][0]['message']['content']
 
-    # Using asyncio to call ChatGPT asynchronously with the parsed text
-    loop = asyncio.get_event_loop()
-    chatgpt_response = loop.run_until_complete(ask_chatgpt_async(parsed_text, openai_api_key))
-    print("ChatGPT Response:", chatgpt_response)
+    # Call text_to_speech with the response text
+    text_to_speech(chatgpt_response)
 
-# Example usage
-if __name__ == "__main__":
-    filename = '/home/jasalat/text.jpg'
-    question = "Solve this question or atleast make sense of it"
-    ocr_api_key = ""
-    openai_api_key = ""
-    main(filename, question, ocr_api_key, openai_api_key)
+if __name__ == '__main__':
+    # Example usage
+    file_path = 'path_to_your_image_file'
+    question = 'Your question here'
+    ocr_api_key = 'your_ocr_api_key'
+    openai_api_key = 'your_openai_api_key'
+
+    asyncio.run(main(file_path, question, ocr_api_key, openai_api_key))
